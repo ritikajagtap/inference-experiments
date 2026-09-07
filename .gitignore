@@ -1,0 +1,17 @@
+# IDE
+.idea/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Model artifacts & generated outputs
+out/
+*.pt
+*.ckpt
+bench.json
+*.loss.json
