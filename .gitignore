@@ -9,6 +9,9 @@ __pycache__/
 venv/
 env/
 
+# Crash dumps
+*.stackdump
+
 # Model artifacts & generated outputs
 out/
 *.pt

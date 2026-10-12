@@ -83,6 +83,25 @@ python benchmark.py --checkpoint out/ckpt.pt --max-new-tokens 200 --sweep --json
 python test_equivalence.py
 ```
 
+## GPU / Modal
+
+Training never touches the KV cache, so it's identical to `../mini-gpt/`
+and a checkpoint trained either place is interchangeable — you normally
+train once and reuse it here, since this folder's point is benchmarking
+inference. To train on a Modal GPU anyway:
+
+```bash
+pip install modal
+modal setup            # one-time auth
+
+modal run modal_app.py --steps 2000
+modal run modal_app.py --steps 2000 --d-model 512 --n-layers 8
+```
+
+The checkpoint is written to a persistent Modal Volume
+(`kv-cache-checkpoints`) and also downloaded to `./out/` when the run
+finishes.
+
 ## Measured result
 
 With `out/ckpt.pt` trained on the toy corpus (`d_model=256, n_layers=6`),
@@ -97,6 +116,50 @@ on CPU, prompt `"the cat"`:
 
 Reproduce with `python benchmark.py --checkpoint out/ckpt.pt --sweep
 --json out/bench.json`.
+
+## FLOPs: cached vs naive
+
+`benchmark.py` measures wall-clock throughput; `flops.py` counts the
+*theoretical* compute each path performs, analytically from `GPTConfig`
+(a multiply-add = 2 FLOPs). No tensors are allocated, so it runs at any
+sequence length — even past `max_seq_len`.
+
+The scaling is the whole story:
+
+- **Naive** reprocesses the entire growing sequence every decode step, so
+  generating `N` tokens costs `Σ forward(P + i)` — **quadratic** in length.
+- **Cached** runs one prefill, then cheap single-token decode steps (each
+  attending to a cache that grows by one), so it costs
+  `forward(P) + Σ decode_step(P + j)` — **linear** in length.
+
+Per forward pass over `T` tokens, summed over layers (`C`=d_model,
+`F`=ffn_dim, `V`=vocab): QKV proj `6·T·C²`, attention `4·T²·C`, output
+proj `2·T·C²`, SwiGLU `6·T·C·F`, plus lm_head `2·T·C·V`. A cached decode
+step is that with `T=1`, keeping only `4·t_ctx·C` of attention against the
+cache.
+
+```bash
+python flops.py                                  # sweep 128/512/1024/2048
+python flops.py --seq-lens 128,512,2048 --json out/flops.json
+python benchmark.py --checkpoint out/ckpt.pt --flops   # alongside tok/s
+```
+
+For the trained `out/ckpt.pt` config (`d_model=256, n_layers=6`, prompt
+`"the cat"`), generating N new tokens:
+
+| new tokens | naive GFLOPs | cached GFLOPs | naive/cached |
+|-----------:|-------------:|--------------:|-------------:|
+| 128        | 97.3         | 1.4           | 68x          |
+| 512        | 1 660.8      | 6.1           | 271x         |
+| 1024       | 7 674.5      | 13.8          | 556x         |
+| 2048       | 39 357.3     | 34.0          | 1158x        |
+
+The compute gap is far larger than the ~3.6x wall-clock speedup, because
+tok/s is bottlenecked by other things (Python overhead, memory bandwidth),
+not raw FLOPs — which is exactly the point of looking at arithmetic
+intensity next: cheap decode FLOPs against weights that must be re-read
+every step make decoding **memory-bound**, so eliminating redundant compute
+doesn't translate 1:1 into speed.
 
 ## What's not here yet
 

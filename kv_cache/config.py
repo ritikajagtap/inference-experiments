@@ -45,6 +45,10 @@ class Defaults:
     benchmark_new_tokens: int = 200
     benchmark_warmup_tokens: int = 20
 
+    # --- FLOPs analysis (analytical; not bounded by max_seq_len since no
+    # tensors are allocated) ---
+    flops_seq_lens: str = "128,512,1024,2048"
+
 
 DEFAULTS = Defaults()
 
@@ -79,6 +83,29 @@ def add_benchmark_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--prompt", type=str, default=DEFAULTS.prompt)
     parser.add_argument("--max-new-tokens", type=int, default=DEFAULTS.benchmark_new_tokens)
     parser.add_argument("--warmup-tokens", type=int, default=DEFAULTS.benchmark_warmup_tokens)
+
+
+def add_flops_args(parser: argparse.ArgumentParser) -> None:
+    """Flags for the analytical FLOPs comparison (flops.py, and
+    benchmark.py's --flops). Shared so both parse --seq-lens identically."""
+
+    parser.add_argument(
+        "--seq-lens",
+        type=parse_seq_lens,
+        default=parse_seq_lens(DEFAULTS.flops_seq_lens),
+        help="comma-separated token counts to sweep, e.g. 128,512,1024,2048",
+    )
+
+
+def parse_seq_lens(value: str) -> list[int]:
+    """Parse a comma-separated list of positive ints for --seq-lens."""
+
+    lengths = [int(part) for part in value.split(",") if part.strip()]
+    if not lengths or any(n <= 0 for n in lengths):
+        raise argparse.ArgumentTypeError(
+            f"--seq-lens must be positive comma-separated ints, got {value!r}"
+        )
+    return lengths
 
 
 def model_config_from_args(args: argparse.Namespace, vocab_size: int) -> "GPTConfig":

@@ -23,7 +23,8 @@ from pathlib import Path
 
 import torch
 
-from config import add_benchmark_args, add_model_args, model_config_from_args
+import flops as flops_model
+from config import add_benchmark_args, add_flops_args, add_model_args, model_config_from_args
 from data import CharTokenizer, DEFAULT_TEXT
 from generate import generate_cached, generate_naive, load_checkpoint
 from model import MiniGPT
@@ -137,9 +138,12 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--checkpoint", type=str, default=None)
     p.add_argument("--sweep", action="store_true", help="also collect per-step and length-sweep data")
-    p.add_argument("--json", type=str, default=None, help="write --sweep results to this path")
+    p.add_argument("--flops", action="store_true",
+                   help="also print analytical FLOPs: cached vs naive")
+    p.add_argument("--json", type=str, default=None, help="write --sweep/--flops results to this path")
 
     add_benchmark_args(p)
+    add_flops_args(p)
     add_model_args(p)
 
     return p.parse_args()
@@ -177,6 +181,8 @@ def main() -> None:
     print()
     print(f"Speedup: {cached_tps / uncached_tps:.2f}x at {args.max_new_tokens} generated tokens")
 
+    results = {"device": str(device), "prompt": args.prompt}
+
     if args.sweep:
         print()
         print("Collecting per-step latency...")
@@ -188,19 +194,37 @@ def main() -> None:
         lengths = sorted({max(1, step_count // 8), step_count // 4, step_count // 2, step_count})
         sweep = length_sweep(model, input_ids, lengths, device)
 
-        results = {
-            "device": str(device),
-            "prompt": args.prompt,
-            "step_times_naive": naive_times,
-            "step_times_cached": cached_times,
-            "length_sweep": sweep,
+        results.update(
+            step_times_naive=naive_times,
+            step_times_cached=cached_times,
+            length_sweep=sweep,
+        )
+
+    if args.flops:
+        prompt_len = input_ids.shape[1]
+        config = model.config
+        rows = flops_model.sweep(config, prompt_len, args.seq_lens)
+
+        G = 1e9
+        print()
+        print("Analytical FLOPs (cached vs naive), generating N new tokens:")
+        print(f"{'new tokens':>10} {'naive GFLOPs':>14} {'cached GFLOPs':>14} {'naive/cached':>14}")
+        for r in rows:
+            print(f"{r['n_new']:>10} {r['naive_flops']/G:>14.2f} "
+                  f"{r['cached_flops']/G:>14.2f} {r['ratio']:>13.1f}x")
+        print("Naive is quadratic in length, cached ~linear - the ratio widens with N.")
+
+        results["flops"] = {
+            "prompt_len": prompt_len,
+            "matmul_params": flops_model.param_count(config),
+            "sweep": rows,
         }
 
-        if args.json:
-            Path(args.json).parent.mkdir(parents=True, exist_ok=True)
-            with open(args.json, "w") as f:
-                json.dump(results, f)
-            print(f"Wrote sweep results to {args.json}")
+    if args.json and (args.sweep or args.flops):
+        Path(args.json).parent.mkdir(parents=True, exist_ok=True)
+        with open(args.json, "w") as f:
+            json.dump(results, f)
+        print(f"\nWrote results to {args.json}")
 
 
 if __name__ == "__main__":
