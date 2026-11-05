@@ -1,0 +1,496 @@
+<meta name="claude:viewport-fit-sides" content="cover">
+<title>Speculative Decode Monitor</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  /* Layout: a two-panel telemetry player — generation on the left, GPU compute
+     meters on the right — over a control bar and a row of running stats. */
+  :root {
+    --bg: #f3f5f8; --panel: #ffffff; --panel-2: #eef1f4; --fg: #141b22;
+    --muted: #5d6974; --line: #d9dee4;
+    --compute: #0d9b98; --memory: #c9801f; --accept: #2e9e63;
+    --reject: #d64f45; --bonus: #5a60e0;
+    --font-ui: "IBM Plex Sans", system-ui, sans-serif;
+    --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    --radius: 12px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0d1116; --panel: #161c22; --panel-2: #1c242c; --fg: #e8edf2;
+      --muted: #8b98a5; --line: #2a333c;
+      --compute: #2dd4bf; --memory: #eab45e; --accept: #46c07e;
+      --reject: #f0675c; --bonus: #8b8ef6; color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0d1116; --panel: #161c22; --panel-2: #1c242c; --fg: #e8edf2;
+    --muted: #8b98a5; --line: #2a333c;
+    --compute: #2dd4bf; --memory: #eab45e; --accept: #46c07e;
+    --reject: #f0675c; --bonus: #8b8ef6; color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--fg); font-family: var(--font-ui);
+    line-height: 1.45; margin: 0;
+  }
+  .wrap {
+    max-width: 1080px; margin: 0 auto;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-block: 22px 40px;
+  }
+
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 14px; }
+  h1 { font-size: 1.5rem; font-weight: 600; margin: 0; letter-spacing: -0.01em; text-wrap: balance; }
+  .sub { color: var(--muted); font-size: 0.9rem; }
+  .meta-line {
+    margin-top: 6px; font-family: var(--font-mono); font-size: 0.8rem;
+    color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center;
+  }
+  .badge {
+    font-family: var(--font-mono); font-size: 0.72rem; font-weight: 500;
+    padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line);
+    color: var(--muted); white-space: nowrap;
+  }
+  .badge.measured { color: var(--compute); border-color: var(--compute); }
+
+  .lead {
+    margin: 16px 0 18px; padding: 12px 15px; background: var(--panel-2);
+    border-radius: var(--radius); border: 1px solid var(--line);
+    font-size: 0.9rem; color: var(--fg);
+  }
+  .lead b { color: var(--compute); }
+
+  /* Controls */
+  .controls {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+    margin-bottom: 12px;
+  }
+  button {
+    font-family: var(--font-ui); font-size: 0.86rem; font-weight: 500;
+    color: var(--fg); background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 12px; cursor: pointer;
+  }
+  button:hover { border-color: var(--muted); }
+  button.primary { background: var(--compute); border-color: var(--compute); color: #fff; }
+  :root[data-theme="dark"] button.primary, :root:not([data-theme="light"]) button.primary { color: #06201e; }
+  button:focus-visible { outline: 2px solid var(--compute); outline-offset: 2px; }
+  .spacer { flex: 1 1 auto; min-width: 8px; }
+  label.speed { font-size: 0.82rem; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  input[type="range"] { accent-color: var(--compute); }
+  .file-btn { position: relative; overflow: hidden; }
+  .file-btn input[type="file"] { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+
+  /* Scrubber */
+  .scrub { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
+  .scrub input[type="range"] { flex: 1 1 auto; min-width: 0; }
+  .pos {
+    font-family: var(--font-mono); font-size: 0.78rem; color: var(--muted);
+    white-space: nowrap; font-variant-numeric: tabular-nums;
+  }
+
+  .grid { display: grid; grid-template-columns: 1.15fr 1fr; gap: 16px; }
+  @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 16px; min-width: 0;
+  }
+  .panel h2 {
+    font-size: 0.74rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--muted); margin: 0 0 12px;
+  }
+
+  /* Generation panel */
+  .output {
+    font-family: var(--font-mono); font-size: 0.95rem; line-height: 1.7;
+    min-height: 120px; word-break: break-word;
+  }
+  .output .tok { border-radius: 3px; padding: 0 1px; }
+  .output .accepted { color: var(--fg); }
+  .output .correction { color: var(--reject); box-shadow: inset 0 -2px 0 var(--reject); }
+  .output .bonus { color: var(--bonus); box-shadow: inset 0 -2px 0 var(--bonus); }
+  .output .cursor { color: var(--muted); animation: blink 1s steps(2) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .output .cursor { animation: none; } }
+
+  .round-label { font-size: 0.78rem; color: var(--muted); margin: 18px 0 8px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; min-height: 34px; }
+  .chip {
+    font-family: var(--font-mono); font-size: 0.82rem; padding: 4px 9px;
+    border-radius: 7px; border: 1px solid var(--line); background: var(--panel-2);
+    white-space: pre;
+  }
+  .chip.guess { color: var(--muted); }
+  .chip.kept { color: var(--accept); border-color: var(--accept);
+    background: color-mix(in srgb, var(--accept) 12%, transparent); }
+  .chip.replaced { color: var(--reject); border-color: var(--reject); text-decoration: line-through; opacity: 0.85; }
+  .chip.discarded { color: var(--muted); text-decoration: line-through; opacity: 0.5; }
+  .chip.empty { opacity: 0.3; border-style: dashed; }
+  .chip.outcome { font-weight: 600; }
+  .chip.outcome.correction { color: var(--reject); border-color: var(--reject);
+    background: color-mix(in srgb, var(--reject) 12%, transparent); }
+  .chip.outcome.bonus { color: var(--bonus); border-color: var(--bonus);
+    background: color-mix(in srgb, var(--bonus) 12%, transparent); }
+  .arrow { color: var(--muted); align-self: center; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 10px 16px; margin-top: 16px;
+    font-size: 0.74rem; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .dot { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+
+  /* Compute panel */
+  .meter { margin-bottom: 16px; }
+  .meter-top { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 5px; }
+  .meter-name { font-size: 0.82rem; font-weight: 500; }
+  .meter-val { font-family: var(--font-mono); font-weight: 600; font-size: 1.15rem;
+    font-variant-numeric: tabular-nums; }
+  .bar { height: 12px; background: var(--panel-2); border-radius: 6px; overflow: hidden; border: 1px solid var(--line); }
+  .bar > span { display: block; height: 100%; width: 0; border-radius: 6px; transition: width 0.28s ease; }
+  .meter.compute .meter-val, .meter.compute .meter-name { color: var(--compute); }
+  .meter.compute .bar > span { background: var(--compute); }
+  .meter.memory .meter-val, .meter.memory .meter-name { color: var(--memory); }
+  .meter.memory .bar > span { background: var(--memory); }
+
+  .phase-tag {
+    display: inline-block; font-family: var(--font-mono); font-size: 0.74rem;
+    padding: 2px 8px; border-radius: 6px; margin-bottom: 12px; font-weight: 500;
+  }
+  .phase-tag.draft { color: var(--memory); background: color-mix(in srgb, var(--memory) 15%, transparent); }
+  .phase-tag.verify { color: var(--compute); background: color-mix(in srgb, var(--compute) 15%, transparent); }
+
+  .strip-head { font-size: 0.74rem; color: var(--muted); margin: 6px 0 6px; }
+  canvas { width: 100%; height: 90px; display: block; }
+  .note { font-size: 0.76rem; color: var(--muted); margin-top: 12px; }
+
+  /* Stats */
+  .stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-top: 16px; }
+  @media (max-width: 760px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+  .stat {
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 12px 13px; min-width: 0;
+  }
+  .stat .k { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+  .stat .v { font-family: var(--font-mono); font-size: 1.35rem; font-weight: 600;
+    font-variant-numeric: tabular-nums; margin-top: 3px; }
+  .stat .v small { font-size: 0.8rem; color: var(--muted); font-weight: 400; }
+  .err { color: var(--reject); font-size: 0.8rem; margin-left: 8px; }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Speculative Decode Monitor</h1>
+    <span class="sub">watch the draft keep the GPU busy while its compute sits idle</span>
+  </header>
+  <div class="meta-line" id="metaLine"></div>
+
+  <p class="lead">
+    Each round the small <b>draft</b> model guesses several tokens one at a time, then the large
+    <b>target</b> model checks them all in a single pass. <b>Compute (SM)</b> is how much of the GPU's
+    math units are working; at batch size one it stays low because each pass is spent re-reading weights
+    from memory. So the draft takes real time but barely uses the GPU's compute.
+  </p>
+
+  <div class="controls">
+    <button class="primary" id="playBtn">▶ Play</button>
+    <button id="stepBack">⟨ Step</button>
+    <button id="stepFwd">Step ⟩</button>
+    <button id="resetBtn">Reset</button>
+    <label class="speed">Speed
+      <input type="range" id="speed" min="80" max="900" value="420" step="20">
+    </label>
+    <span class="spacer"></span>
+    <button class="file-btn">Load trace.json
+      <input type="file" id="fileIn" accept="application/json,.json">
+    </button>
+    <span class="err" id="err" hidden></span>
+  </div>
+
+  <div class="scrub">
+    <input type="range" id="scrub" min="0" value="0">
+    <span class="pos" id="pos"></span>
+  </div>
+
+  <div class="grid">
+    <section class="panel">
+      <h2>Generation</h2>
+      <div class="output" id="output"></div>
+      <div class="round-label" id="roundLabel"></div>
+      <div class="chips" id="chips"></div>
+      <div class="legend">
+        <span><i class="dot" style="background:var(--accept)"></i>accepted guess</span>
+        <span><i class="dot" style="background:var(--reject)"></i>rejected / correction</span>
+        <span><i class="dot" style="background:var(--bonus)"></i>bonus token</span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>GPU compute</h2>
+      <span class="phase-tag" id="phaseTag"></span>
+      <div class="meter compute">
+        <div class="meter-top"><span class="meter-name">Compute (SM)</span><span class="meter-val" id="smVal">0%</span></div>
+        <div class="bar"><span id="smBar"></span></div>
+      </div>
+      <div class="meter memory">
+        <div class="meter-top"><span class="meter-name">Memory bandwidth</span><span class="meter-val" id="memVal">0%</span></div>
+        <div class="bar"><span id="memBar"></span></div>
+      </div>
+      <div class="strip-head">Compute (SM) over the run — low flats are the draft, taller marks are the target checking</div>
+      <canvas id="strip" width="800" height="180"></canvas>
+      <p class="note" id="sourceNote"></p>
+    </section>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><div class="k">Acceptance</div><div class="v" id="sAcc">–</div></div>
+    <div class="stat"><div class="k">Tokens / target pass</div><div class="v" id="sYield">–</div></div>
+    <div class="stat"><div class="k">Draft passes</div><div class="v" id="sDraft">–</div></div>
+    <div class="stat"><div class="k">Target passes</div><div class="v" id="sTarget">–</div></div>
+    <div class="stat"><div class="k">Tokens made</div><div class="v" id="sTokens">–</div></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+// ---- Sample run (modeled). Replaced when a real trace.json is loaded. ----
+// Modeled SM/memory values follow the physics of batch-one decoding: each pass is
+// memory-bound, so compute (SM) stays low; the target's batched check does more math
+// per weight-read than a single-token step, so its SM is a little higher.
+function buildSampleTrace() {
+  const GAMMA = 4;
+  const target = ["Spec", "ulative", " decoding", " makes", " a", " large", " model",
+    " faster", " by", " letting", " a", " small", " draft", " model", " guess",
+    " the", " next", " few", " tokens", "."];
+  const accepts = [3, 1, 4, 2, 0, 4];               // draft tokens kept each round
+  const wrongPool = [" the", " very", " cat", " fast", " data", " system", " run", " node"];
+  const rnd = (a, b) => +(a + Math.random() * (b - a)).toFixed(1);
+
+  let pos = 0, wp = 0;
+  const rounds = [];
+  for (const na of accepts) {
+    const accepted = target.slice(pos, pos + na);
+    const extra = target[pos + na];                 // correction (miss) or bonus (full match)
+    const full = na === GAMMA;
+    const proposals = accepted.slice();
+    while (proposals.length < GAMMA) proposals.push(wrongPool[wp++ % wrongPool.length]);
+    const committed = accepted.map(t => ({ text: t, kind: "accepted" }));
+    committed.push({ text: extra, kind: full ? "bonus" : "correction" });
+    rounds.push({
+      proposals, nAccept: na, committed,
+      draftSm: proposals.map(() => rnd(8, 14)), targetSm: rnd(27, 36),
+      draftMem: proposals.map(() => rnd(80, 90)), targetMem: rnd(74, 84),
+      draftMs: proposals.map(() => rnd(4.5, 7)), targetMs: rnd(9, 13),
+    });
+    pos += na + 1;
+  }
+  return {
+    meta: {
+      draft_model: "Qwen/Qwen2.5-0.5B-Instruct", target_model: "Qwen/Qwen2.5-7B-Instruct",
+      gpu: "sample (no GPU)", precision: "bfloat16", gamma: GAMMA,
+      utilization_source: "modeled",
+    },
+    rounds,
+  };
+}
+
+// ---- Build a flat event timeline from a trace ----
+let trace, events, gamma, el = {};
+
+function buildEvents(t) {
+  gamma = t.meta.gamma || (t.rounds[0] ? t.rounds[0].proposals.length : 4);
+  const ev = [];
+  t.rounds.forEach((r, ri) => {
+    for (let s = 0; s < r.proposals.length; s++)
+      ev.push({ kind: "draft", round: ri, step: s, sm: r.draftSm[s], mem: r.draftMem[s] });
+    ev.push({ kind: "verify", round: ri, sm: r.targetSm, mem: r.targetMem });
+  });
+  return ev;
+}
+
+// ---- Deterministic state at a given event index (so scrubbing works) ----
+function stateAt(idx) {
+  const e = events[idx];
+  const out = [];
+  let draftPasses = 0, verifies = 0, accepted = 0;
+  for (let i = 0; i <= idx; i++) {
+    if (events[i].kind === "draft") draftPasses++;
+    else { verifies++; accepted += trace.rounds[events[i].round].nAccept; }
+  }
+  // Committed text: all rounds before the current one, plus the current round once verified.
+  for (let r = 0; r < e.round; r++) out.push(...trace.rounds[r].committed);
+  if (e.kind === "verify") out.push(...trace.rounds[e.round].committed);
+
+  const revealed = e.kind === "draft" ? e.step + 1 : gamma;
+  const verified = e.kind === "verify";
+  const tokens = out.length;
+  return {
+    e, out, revealed, verified, draftPasses, verifies, tokens,
+    acceptance: verifies ? accepted / (verifies * gamma) : 0,
+    yield: verifies ? tokens / verifies : 0,
+  };
+}
+
+// ---- Rendering ----
+let cur = 0, timer = null;
+
+function render() {
+  const s = stateAt(cur);
+  const e = s.e, round = trace.rounds[e.round];
+
+  // Output text
+  el.output.innerHTML = s.out.map(t =>
+    `<span class="tok ${t.kind}">${escapeHtml(t.text)}</span>`).join("") +
+    `<span class="cursor">▍</span>`;
+
+  // Current round proposals
+  el.roundLabel.textContent =
+    `Round ${e.round + 1} of ${trace.rounds.length} — draft proposes ${gamma}, target keeps ${round.nAccept}`;
+  let chips = "";
+  for (let i = 0; i < gamma; i++) {
+    if (i >= s.revealed) { chips += `<span class="chip empty">·</span>`; continue; }
+    let cls = "guess";
+    if (s.verified) {
+      if (i < round.nAccept) cls = "kept";
+      else if (i === round.nAccept) cls = "replaced";
+      else cls = "discarded";
+    }
+    chips += `<span class="chip ${cls}">${escapeHtml(round.proposals[i])}</span>`;
+  }
+  if (s.verified) {
+    const last = round.committed[round.committed.length - 1];
+    chips += `<span class="arrow">→</span><span class="chip outcome ${last.kind}">${escapeHtml(last.text)}</span>`;
+  }
+  el.chips.innerHTML = chips;
+
+  // Compute meters
+  const draftPhase = e.kind === "draft";
+  el.phaseTag.className = "phase-tag " + (draftPhase ? "draft" : "verify");
+  el.phaseTag.textContent = draftPhase
+    ? `draft model — guess ${e.step + 1}/${gamma}` : "target model — checking all guesses";
+  el.smVal.textContent = Math.round(e.sm) + "%";
+  el.smBar.style.width = e.sm + "%";
+  el.memVal.textContent = Math.round(e.mem) + "%";
+  el.memBar.style.width = e.mem + "%";
+
+  drawStrip();
+
+  // Stats
+  el.sAcc.innerHTML = Math.round(s.acceptance * 100) + "<small>%</small>";
+  el.sYield.innerHTML = s.yield.toFixed(2) + "<small> tok</small>";
+  el.sDraft.textContent = s.draftPasses;
+  el.sTarget.textContent = s.verifies;
+  el.sTokens.textContent = s.tokens;
+
+  el.scrub.value = cur;
+  el.pos.textContent = `event ${cur + 1} / ${events.length}`;
+  el.playBtn.innerHTML = timer ? "❚❚ Pause" : "▶ Play";
+}
+
+function drawStrip() {
+  const c = el.strip, ctx = c.getContext("2d");
+  const W = c.width, H = c.height, pad = 10;
+  ctx.clearRect(0, 0, W, H);
+  const n = events.length;
+  const x = i => pad + (W - 2 * pad) * (n > 1 ? i / (n - 1) : 0);
+  const y = v => H - pad - (H - 2 * pad) * (v / 100);
+  const css = n2 => getComputedStyle(document.documentElement).getPropertyValue(n2).trim();
+  const compute = css("--compute"), line = css("--line");
+
+  // baseline grid at 25/50/75%
+  ctx.strokeStyle = line; ctx.lineWidth = 1;
+  [25, 50, 75].forEach(v => { ctx.beginPath(); ctx.moveTo(pad, y(v)); ctx.lineTo(W - pad, y(v)); ctx.stroke(); });
+
+  // area under the SM curve up to the current event
+  ctx.beginPath();
+  ctx.moveTo(x(0), y(0));
+  for (let i = 0; i <= cur; i++) ctx.lineTo(x(i), y(events[i].sm));
+  ctx.lineTo(x(cur), y(0));
+  ctx.closePath();
+  ctx.fillStyle = hexA(compute, 0.18); ctx.fill();
+
+  // line
+  ctx.beginPath();
+  for (let i = 0; i <= cur; i++) (i ? ctx.lineTo : ctx.moveTo).call(ctx, x(i), y(events[i].sm));
+  ctx.strokeStyle = compute; ctx.lineWidth = 2; ctx.stroke();
+
+  // current position marker
+  ctx.beginPath(); ctx.arc(x(cur), y(events[cur].sm), 3.5, 0, 7); ctx.fillStyle = compute; ctx.fill();
+}
+
+function hexA(hex, a) {
+  hex = hex.replace("#", "");
+  if (hex.length === 3) hex = hex.split("").map(c => c + c).join("");
+  const r = parseInt(hex.slice(0, 2), 16), g = parseInt(hex.slice(2, 4), 16), b = parseInt(hex.slice(4, 6), 16);
+  return `rgba(${r},${g},${b},${a})`;
+}
+function escapeHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/ /g, " ");
+}
+
+function renderMeta() {
+  const m = trace.meta;
+  el.metaLine.innerHTML =
+    `<span>${escapeHtmlPlain(m.target_model)}</span>` +
+    `<span>drafted by ${escapeHtmlPlain(m.draft_model)}</span>` +
+    `<span>γ = ${m.gamma}</span><span>${escapeHtmlPlain(m.precision || "")}</span>` +
+    `<span>${escapeHtmlPlain(m.gpu || "")}</span>` +
+    `<span class="badge ${/measured/i.test(m.utilization_source) ? "measured" : ""}">${escapeHtmlPlain(m.utilization_source || "modeled")}</span>`;
+  el.sourceNote.textContent = /measured/i.test(m.utilization_source || "")
+    ? "Measured from the GPU driver (NVML) during the recorded run."
+    : "These figures are modeled. Load a trace.json recorded on a GPU to see measured NVML values.";
+}
+function escapeHtmlPlain(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+
+// ---- Playback ----
+function stop() { if (timer) { clearInterval(timer); timer = null; } }
+function play() {
+  if (timer) { stop(); render(); return; }
+  if (cur >= events.length - 1) cur = 0;
+  const speed = 980 - (+el.speed.value);   // slider: right = faster
+  timer = setInterval(() => {
+    if (cur >= events.length - 1) { stop(); render(); return; }
+    cur++; render();
+  }, speed);
+  render();
+}
+
+function load(t) {
+  trace = t; events = buildEvents(t); cur = events.length - 1;
+  el.scrub.max = events.length - 1;
+  renderMeta(); render();
+}
+
+function init() {
+  ["metaLine", "output", "roundLabel", "chips", "phaseTag", "smVal", "smBar",
+   "memVal", "memBar", "strip", "sourceNote", "scrub", "pos", "playBtn", "speed",
+   "sAcc", "sYield", "sDraft", "sTarget", "sTokens", "err"].forEach(id => el[id] = document.getElementById(id));
+
+  el.playBtn.onclick = play;
+  el.resetBtn.onclick = () => { stop(); cur = 0; render(); };
+  el.stepFwd.onclick = () => { stop(); cur = Math.min(events.length - 1, cur + 1); render(); };
+  el.stepBack.onclick = () => { stop(); cur = Math.max(0, cur - 1); render(); };
+  el.scrub.oninput = () => { stop(); cur = +el.scrub.value; render(); };
+
+  document.getElementById("fileIn").onchange = (ev) => {
+    const f = ev.target.files[0]; if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const t = JSON.parse(reader.result);
+        if (!t.rounds || !Array.isArray(t.rounds) || !t.rounds.length) throw new Error("no rounds in file");
+        if (!t.meta) t.meta = { utilization_source: "measured" };
+        el.err.hidden = true; load(t);
+      } catch (e2) { el.err.hidden = false; el.err.textContent = "Could not read trace: " + e2.message; }
+    };
+    reader.readAsText(f);
+  };
+
+  // Redraw the canvas when the OS theme flips (colors come from CSS tokens).
+  if (window.matchMedia) window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => render());
+
+  load(buildSampleTrace());
+}
+init();
+</script>

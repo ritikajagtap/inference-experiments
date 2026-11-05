@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.cache/
+.env
+# Generated benchmark artifacts (the results/ dir itself is kept via .gitkeep)
+results/*.csv
+results/plots/
+# Recorded GPU traces for monitor.html (monitor.html itself is tracked)
+trace.json
+*.trace.json
