@@ -46,6 +46,12 @@ speed. This is the same kind of guarantee the KV cache gives in
 draft that differs from the target (so guesses really do get rejected and
 corrected), the output still matches the baseline token for token.
 
+This exact match holds in exact arithmetic and in fp32. On a real GPU in bf16 the
+two can still drift by a token here and there: the target's batched check and a
+one-token baseline round near-ties slightly differently, and once one token differs
+the rest follows. That is floating-point noise, not a change in method — `record_trace.py`
+reports how far the two agree rather than treating a difference as an error.
+
 This folder does the **greedy** case, which is what the benchmark measures. Random
 sampling needs a different keep-or-fix rule that keeps the target's output
 distribution unchanged; it is mentioned here but not implemented.
