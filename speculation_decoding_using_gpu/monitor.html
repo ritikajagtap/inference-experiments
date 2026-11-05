@@ -80,6 +80,13 @@
   input[type="range"] { accent-color: var(--compute); }
   .file-btn { position: relative; overflow: hidden; }
   .file-btn input[type="file"] { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+  #pasteWrap { display: flex; flex-direction: column; gap: 8px; margin-bottom: 18px; }
+  #pasteBox {
+    width: 100%; min-height: 96px; font-family: var(--font-mono); font-size: 0.78rem;
+    padding: 10px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--panel); color: var(--fg); resize: vertical;
+  }
+  #pasteBtn { align-self: flex-start; }
 
   /* Scrubber */
   .scrub { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
@@ -203,7 +210,13 @@
     <button class="file-btn">Load trace.json
       <input type="file" id="fileIn" accept="application/json,.json">
     </button>
+    <button id="pasteToggle">or paste JSON</button>
     <span class="err" id="err" hidden></span>
+  </div>
+
+  <div id="pasteWrap" hidden>
+    <textarea id="pasteBox" placeholder="On the pod run:  cat trace.json  — then copy the output and paste it here."></textarea>
+    <button id="pasteBtn" class="primary">Load pasted JSON</button>
   </div>
 
   <div class="scrub">
@@ -473,19 +486,23 @@ function init() {
   el.stepBack.onclick = () => { stop(); cur = Math.max(0, cur - 1); render(); };
   el.scrub.oninput = () => { stop(); cur = +el.scrub.value; render(); };
 
+  function loadFromText(text) {
+    try {
+      const t = JSON.parse(String(text).replace(/^﻿/, "").trim());
+      if (!t.rounds || !Array.isArray(t.rounds) || !t.rounds.length) throw new Error("no rounds found");
+      if (!t.meta) t.meta = { utilization_source: "measured" };
+      el.err.hidden = true; load(t);
+    } catch (e2) { el.err.hidden = false; el.err.textContent = "Could not read trace: " + e2.message; }
+  }
   document.getElementById("fileIn").onchange = (ev) => {
     const f = ev.target.files[0]; if (!f) return;
     const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const t = JSON.parse(reader.result);
-        if (!t.rounds || !Array.isArray(t.rounds) || !t.rounds.length) throw new Error("no rounds in file");
-        if (!t.meta) t.meta = { utilization_source: "measured" };
-        el.err.hidden = true; load(t);
-      } catch (e2) { el.err.hidden = false; el.err.textContent = "Could not read trace: " + e2.message; }
-    };
+    reader.onload = () => loadFromText(reader.result);
     reader.readAsText(f);
   };
+  const pasteWrap = document.getElementById("pasteWrap");
+  document.getElementById("pasteToggle").onclick = () => { pasteWrap.hidden = !pasteWrap.hidden; };
+  document.getElementById("pasteBtn").onclick = () => loadFromText(document.getElementById("pasteBox").value);
 
   // Redraw the canvas when the OS theme flips (colors come from CSS tokens).
   if (window.matchMedia) window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => render());
