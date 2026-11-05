@@ -202,7 +202,8 @@ def main():
     # One target forward per token, EOS ignored, so every path emits exactly
     # generated_tokens: baseline and every gamma produce the same reference text.
     def baseline_fn(inputs):
-        return lambda: greedy_generate(target, inputs, args.generated_tokens, eos_id=None)
+        return lambda: greedy_generate(target, inputs, args.generated_tokens, eos_id=None,
+                                       vocab_limit=info["shared_vocab"])
 
     def spec_fn(inputs, gamma):
         return lambda: speculative_generate(draft, target, inputs, args.generated_tokens, gamma, eos_id=None)

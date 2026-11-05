@@ -66,16 +66,23 @@ def load_pair(
     draft_model = load(draft, draft_commit)
     target_model = load(target, target_commit)
 
-    if draft_model.config.vocab_size != target_model.config.vocab_size:
+    # The two models must share a tokenizer, but their lm_head sizes can differ:
+    # a family often pads the embedding to different multiples (e.g. Qwen2.5-0.5B has
+    # 151936 rows, Qwen2.5-7B has 152064), and the extra rows are unused padding. So
+    # the real requirement is that every token id the tokenizer can produce is a valid
+    # row in BOTH models; decoding then runs over the shared (smaller) vocabulary.
+    shared_vocab = min(draft_model.config.vocab_size, target_model.config.vocab_size)
+    if len(tokenizer) > shared_vocab:
         raise ValueError(
-            "Draft and target vocab sizes differ "
-            f"({draft_model.config.vocab_size} vs {target_model.config.vocab_size}); "
-            "speculative decoding requires a shared vocabulary (use models from one family)"
+            f"Tokenizer has {len(tokenizer)} tokens but the smaller model only has "
+            f"{shared_vocab} rows; the draft and target are not compatible "
+            "(use a draft and target that share a tokenizer)"
         )
 
     info = {
         "draft_revision": draft_commit,
         "target_revision": target_commit,
         "target_max_position_embeddings": target_config.max_position_embeddings,
+        "shared_vocab": shared_vocab,
     }
     return draft_model, target_model, tokenizer, info

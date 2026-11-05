@@ -79,7 +79,8 @@ def main() -> None:
     if not args.no_baseline:
         torch.cuda.synchronize(device)
         start = time.perf_counter()
-        base_ids, base_stats = greedy_generate(target, input_ids, args.max_new_tokens, eos_id)
+        base_ids, base_stats = greedy_generate(target, input_ids, args.max_new_tokens, eos_id,
+                                               vocab_limit=info["shared_vocab"])
         torch.cuda.synchronize(device)
         base_time = time.perf_counter() - start
 

@@ -75,9 +75,12 @@ def mean_in_window(samples, window, field: int) -> float:
     return round(min(samples, key=lambda s: abs(s[0] - middle))[field], 1)
 
 
-def record(draft, target, tokenizer, input_ids, max_new_tokens, gamma, device, torch):
+def record(draft, target, tokenizer, input_ids, max_new_tokens, gamma, device, torch, vocab_limit):
     """Run speculative decoding while timing each phase. Returns (sequence, rounds)
-    where each round records its guesses, outcome, and per-phase time windows."""
+    where each round records its guesses, outcome, and per-phase time windows.
+
+    Mirrors speculative_decoding.speculative_generate (same forward/cache helpers,
+    same shared-vocab clipping) with timing and token capture added."""
     from transformers import DynamicCache
 
     sync = (lambda: torch.cuda.synchronize(device)) if device.type == "cuda" else (lambda: None)
@@ -94,7 +97,7 @@ def record(draft, target, tokenizer, input_ids, max_new_tokens, gamma, device, t
         for _ in range(gamma):
             sync(); start = time.perf_counter()
             logits, draft_cache = _forward(draft, draft_cache, feed, keep=1)
-            feed = _greedy_token(logits)
+            feed = _greedy_token(logits[..., :vocab_limit])
             sync(); draft_windows.append((start, time.perf_counter()))
             proposals.append(feed)
         proposal_ids = torch.cat(proposals, dim=1)
@@ -103,7 +106,7 @@ def record(draft, target, tokenizer, input_ids, max_new_tokens, gamma, device, t
         sync(); start = time.perf_counter()
         target_feed = torch.cat([_tokens_not_cached(prefix, target_cache), proposal_ids], dim=1)
         logits, target_cache = _forward(target, target_cache, target_feed, keep=gamma + 1)
-        target_picks = logits[0].argmax(dim=-1)
+        target_picks = logits[0, :, :vocab_limit].argmax(dim=-1)
         sync(); target_window = (start, time.perf_counter())
 
         n_accept = 0
@@ -191,7 +194,8 @@ def main() -> None:
     input_ids = tokenizer(text, return_tensors="pt").input_ids.to(device)
 
     # Warm up kernels before measuring (not recorded).
-    record(draft, target, tokenizer, input_ids, max_new_tokens=8, gamma=args.gamma, device=device, torch=torch)
+    record(draft, target, tokenizer, input_ids, max_new_tokens=8, gamma=args.gamma,
+           device=device, torch=torch, vocab_limit=info["shared_vocab"])
 
     pynvml.nvmlInit()
     handle = pynvml.nvmlDeviceGetHandleByIndex(args.nvml_index if args.nvml_index is not None else args.device)
@@ -199,7 +203,8 @@ def main() -> None:
     sampler.start()
     try:
         sequence, rounds = record(draft, target, tokenizer, input_ids,
-                                  args.max_new_tokens, args.gamma, device, torch)
+                                  args.max_new_tokens, args.gamma, device, torch,
+                                  vocab_limit=info["shared_vocab"])
     finally:
         sampler.stop()
     gpu_name = pynvml.nvmlDeviceGetName(handle)
@@ -208,7 +213,8 @@ def main() -> None:
 
     # Safety net: the committed tokens must equal plain greedy decoding (the whole
     # correctness guarantee). If they differ, something is wrong — do not ship it.
-    baseline, _ = greedy_generate(target, input_ids, args.max_new_tokens, eos_id=None)
+    baseline, _ = greedy_generate(target, input_ids, args.max_new_tokens, eos_id=None,
+                                  vocab_limit=info["shared_vocab"])
     if not torch.equal(sequence, baseline):
         raise SystemExit("Recorded output does not match the greedy baseline; trace not written.")
 

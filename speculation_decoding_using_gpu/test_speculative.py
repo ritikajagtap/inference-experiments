@@ -61,6 +61,19 @@ class SpeculativeDecodingTests(unittest.TestCase):
         self.assertLess(stats.target_forwards, base_stats.target_forwards)
         self.assertGreater(stats.mean_committed_per_round, 1.5)
 
+    def test_mismatched_vocab_sizes(self):
+        """Draft and target with different lm_head sizes (like Qwen2.5-0.5B's 151936
+        vs 7B's 152064) still work: decoding runs over the shared vocab, so output
+        matches the baseline clipped to that same vocab and every id stays valid."""
+        import torch
+        draft = tiny_model(5, vocab=64)
+        target = tiny_model(6, vocab=72)
+        input_ids = torch.tensor([[1, 2, 3, 4]])
+        spec, _ = speculative_generate(draft, target, input_ids, max_new_tokens=20, gamma=4)
+        base, _ = greedy_generate(target, input_ids, max_new_tokens=20, vocab_limit=64)
+        self.assertTrue(torch.equal(spec, base))
+        self.assertLess(int(spec.max()), 64)   # every committed id is valid for the smaller model
+
     def test_gamma_must_be_positive(self):
         import torch
         model = tiny_model(4)

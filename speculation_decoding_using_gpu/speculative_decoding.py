@@ -96,11 +96,19 @@ def _crop(cache: DynamicCache, length: int) -> None:
 
 @torch.no_grad()
 def greedy_generate(
-    model: torch.nn.Module, input_ids: torch.Tensor, max_new_tokens: int, eos_id: int | None = None
+    model: torch.nn.Module,
+    input_ids: torch.Tensor,
+    max_new_tokens: int,
+    eos_id: int | None = None,
+    vocab_limit: int | None = None,
 ) -> tuple[torch.Tensor, SpecStats]:
     """Plain greedy decoding with a KV cache: one target pass per token. This is the
     baseline every speculative run is compared against. Returns (sequence, stats);
     stats fills in only the fields that apply, so both generators report the same way.
+
+    `vocab_limit` restricts the argmax to the first N logits. Pass the draft/target
+    shared vocab when using this as the reference for a speculative run, so both see
+    the same effective vocabulary (model families often pad the lm_head differently).
     """
     cache = DynamicCache()
     stats = SpecStats()
@@ -112,7 +120,7 @@ def greedy_generate(
         logits, cache = _forward(model, cache, feed, keep=1)
         stats.target_forwards += 1
         stats.committed += 1
-        next_token = _greedy_token(logits)
+        next_token = _greedy_token(logits if vocab_limit is None else logits[..., :vocab_limit])
         generated.append(next_token)
         if eos_id is not None and next_token.item() == eos_id:
             break
@@ -133,13 +141,20 @@ def speculative_generate(
     """Greedy speculative decoding: the draft proposes `gamma` tokens each round and
     the target checks them all in one pass.
 
-    `draft` and `target` must share a vocabulary so the target can check the draft's
+    `draft` and `target` must share a tokenizer so the target can check the draft's
     token ids directly. Returns (sequence, stats). The sequence is cut to exactly
     `max_new_tokens` new tokens (a round can run a little past that).
+
+    Both models' argmax is restricted to the shared vocabulary (the smaller of the
+    two lm_head sizes). Model families often pad the lm_head to different sizes — e.g.
+    Qwen2.5-0.5B has 151936 rows and Qwen2.5-7B has 152064 — but the extra rows are
+    unused padding, so clipping to the smaller size keeps every token id valid for
+    both models and loses no real token.
     """
     if gamma < 1:
         raise ValueError("gamma must be >= 1")
 
+    vocab_limit = min(draft.config.vocab_size, target.config.vocab_size)
     prompt_len = input_ids.shape[1]
     draft_cache = DynamicCache()
     target_cache = DynamicCache()
@@ -154,7 +169,7 @@ def speculative_generate(
         for _ in range(gamma):
             logits, draft_cache = _forward(draft, draft_cache, feed, keep=1)
             stats.draft_forwards += 1
-            feed = _greedy_token(logits)
+            feed = _greedy_token(logits[..., :vocab_limit])
             proposals.append(feed)
         proposal_ids = torch.cat(proposals, dim=1)        # (1, gamma)
 
@@ -164,7 +179,7 @@ def speculative_generate(
         target_feed = torch.cat([_tokens_not_cached(prefix, target_cache), proposal_ids], dim=1)
         logits, target_cache = _forward(target, target_cache, target_feed, keep=gamma + 1)
         stats.target_forwards += 1
-        target_picks = logits[0].argmax(dim=-1)           # (gamma+1,) one pick per position
+        target_picks = logits[0, :, :vocab_limit].argmax(dim=-1)   # (gamma+1,) one pick per position
 
         # 3. Keep proposals from the start for as long as they match the target's pick.
         stats.rounds += 1
