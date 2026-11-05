@@ -48,16 +48,18 @@ class GpuSampler(threading.Thread):
         self.pynvml = pynvml
         self.interval_s = interval_s
         self.samples: list[tuple[float, float, float]] = []
-        self._stop = threading.Event()
+        # NB: not `self._stop` — threading.Thread already has an internal _stop() method
+        # that join() calls, and shadowing it with an Event breaks join().
+        self._stop_event = threading.Event()
 
     def run(self) -> None:
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             util = self.pynvml.nvmlDeviceGetUtilizationRates(self.handle)
             self.samples.append((time.perf_counter(), float(util.gpu), float(util.memory)))
             time.sleep(self.interval_s)
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
         self.join()
 
 
