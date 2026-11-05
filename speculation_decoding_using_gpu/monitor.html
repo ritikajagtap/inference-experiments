@@ -478,6 +478,7 @@ function load(t) {
 function init() {
   ["metaLine", "output", "roundLabel", "chips", "phaseTag", "smVal", "smBar",
    "memVal", "memBar", "strip", "sourceNote", "scrub", "pos", "playBtn", "speed",
+   "resetBtn", "stepFwd", "stepBack",
    "sAcc", "sYield", "sDraft", "sTarget", "sTokens", "err"].forEach(id => el[id] = document.getElementById(id));
 
   el.playBtn.onclick = play;
